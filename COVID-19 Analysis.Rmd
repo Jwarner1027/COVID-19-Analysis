@@ -1,0 +1,543 @@
+---
+title: "COVID-19-Analysis"
+author: "Jessica W"
+date: "2024-04-08"
+output: html_document
+---
+
+# Introduction
+
+The COVID-19 pandemic made a significant impact on global health and societies.
+Understanding how the virus and how it impacted various areas and their
+populations is very important in shaping the future of public health policy
+decisions and how vulnerable certain areas can be. In this analysis, we will
+examine the spread of the data throughout 2020-2023 in the United States using
+publicly available data from John's Hopkins.
+
+Our objective in this analysis is to explore the trend of cases and deaths from
+COVID-19 through the years provided by the data and what the propagation of
+cases looked like throughout the United States. Then specifically, we will take
+a closer look at the spread of cases is in my own state of Wisconsin across its
+cities.
+
+We'll begin by cleaning and pre-processing the data, followed by exploratory
+data analysis and visualization to understand the distribution and trends of 
+COVID-19cases and deaths throughout both the US as a whole as well as a closer
+look at one state.
+
+Through this analysis, we hope to contribute to the ongoing efforts to combat
+the COVID-19 pandemic and mitigate its impact on communities around the world.
+
+
+# Setup and Libraries
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+```
+
+```{r libraries, warning= FALSE, message = FALSE}
+
+# Import necessary libraries
+library(tidyverse)
+library(tidyr)
+library(lubridate)
+library(RColorBrewer)
+library(leaflet)
+library(geojsonio)
+```
+
+
+# Data Preparation
+
+
+```{r data import, message = FALSE}
+
+# Initial constant url
+url_in <- 'https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/csse_covid_19_data/csse_covid_19_time_series/'
+
+# Files needed
+file_names <- c("time_series_covid19_confirmed_global.csv",
+                "time_series_covid19_deaths_global.csv",
+                "time_series_covid19_confirmed_US.csv",
+                "time_series_covid19_deaths_US.csv")
+
+# Concatenate strings
+urls <- str_c(url_in, file_names)
+
+# Read in CSVs
+global_cases <- read_csv(urls[1])
+global_deaths <- read_csv(urls[2])
+us_cases <- read_csv(urls[3])
+us_deaths <- read_csv(urls[4])
+
+### Might not Need ###
+lookup_table <- read_csv("https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/csse_covid_19_data/UID_ISO_FIPS_LookUp_Table.csv")
+```
+
+
+```{r states population}
+# View of the lookup table that has been filtered to only the 50 States
+head(lookup_table %>% 
+       filter(iso3 == 'USA'), 60)
+
+# Filter out any unwanted entries to only get entries that include population
+# for the whole state
+us_states_pop <- lookup_table %>%
+  filter(
+    iso3 == 'USA' &
+    is.na(Admin2) &
+    !is.na(Population) &
+    Province_State >= "Alabama" &
+    Province_State <= "Wyoming"
+  )
+
+# Verify the data for later use
+us_states_pop
+```
+
+
+
+```{r cases/deaths tables}
+
+# Look at if there are any areas/regions outside of the US like Puerto Rico etc
+us_cases %>% 
+  count(iso3)
+
+# Filter to only the States for this analysis
+us_cases <- us_cases %>% 
+  filter(iso3 == 'USA')
+
+us_deaths <- us_deaths %>% 
+  filter(iso3 == 'USA')
+
+# View the data
+head(us_cases)
+head(us_deaths)
+```
+
+
+```{r cases/deaths clean up}
+
+# Filter out unnecessary columns and pivot the dates to a Date column and create
+# new column for cases on that day
+us_cases <- us_cases %>%
+  select(-c('UID', 'iso2', 'iso3', 'code3', 'FIPS', 'Country_Region', 'Combined_Key')) %>%
+  pivot_longer(cols = -c('Admin2','Province_State', 'Lat', 'Long_'),
+               names_to = 'Date',
+               values_to = 'cases') %>%
+  mutate(Date = mdy(Date))
+
+
+head(us_cases)
+
+# Same process for the US deaths
+us_deaths <- us_deaths %>%
+  select(-c('UID', 'iso2', 'iso3', 'code3', 'FIPS', 'Country_Region', 'Combined_Key', 'Population')) %>%
+  pivot_longer(cols = -c('Admin2','Province_State', 'Lat', 'Long_'),
+               names_to = 'Date',
+               values_to = 'deaths') %>%
+  mutate(Date = mdy(Date))
+
+head(us_deaths)
+
+```
+
+```{r NA filtering}
+
+# View summaries to better understand the data
+summary(us_cases)
+summary(us_deaths)
+
+# Filter out where cases/deaths are less than zero
+us_cases %>%
+  filter(cases < 0)
+
+us_deaths %>% 
+  filter(deaths < 0)
+
+# Filter around these dates to see where it's happening
+start_date <- '2022-05-03'
+end_date <- '2022-05-10'
+
+us_cases %>% 
+  filter(Province_State == "South Carolina" & Date >= start_date & Date <= end_date)
+
+us_deaths %>% 
+  filter(Province_State == "South Carolina" & Date >= start_date & Date <= end_date)
+
+# Filter out out where admin is 'Unassigned' because all values either 0 or neg
+us_cases <- us_cases %>%
+  filter(Admin2 != 'Unassigned')
+
+us_deaths <- us_deaths %>% 
+  filter(Admin2 != 'Unassigned')
+```
+```{r summaries}
+# Check that worked as needed
+summary(us_cases)
+summary(us_deaths)
+```
+
+
+
+```{r us data join}
+# Join all the data together into one table
+us_data <- us_cases %>%
+  full_join(us_deaths)
+
+# Check the column names
+colnames(us_data)
+
+# See if there are any NA values
+na_counts <- colSums(is.na(us_data))
+print(na_counts)
+
+# Sanity check that data all lines up
+summary(us_data)
+
+```
+# Data Analysis and Visualizations
+
+```{r total calculations}
+# Calculate max date, total cases, and total deaths
+
+max_date <- max(us_data$Date)
+max_date
+
+us_total_cases <- us_data %>%
+  filter(Date == max_date) %>%
+  summarize(total_cases =sum(cases))
+
+us_total_deaths <- us_data %>%
+  filter(Date == max_date) %>%
+  summarize(total_deaths =sum(deaths))
+
+print(us_total_cases)
+print(us_total_deaths)
+```
+
+
+```{r cases per day}
+# Calculate the total number of cases for each day
+totals_summary <- us_data %>% 
+  select(Date, deaths, cases) %>% 
+  filter(Date >= '2020-01-22', Date <= max_date) %>% 
+  group_by(Date) %>% 
+  summarize(total_deaths = sum(deaths), total_cases = sum(cases))
+
+head(totals_summary)
+```
+
+```{r cases/deaths over time graphs, warning = FALSE}
+# Plot out the graph for the total cases and total deaths by date
+ggplot(totals_summary, aes(x = Date, y = total_cases)) +
+  geom_line(color = "blue", size = 1) +
+  labs(title = "COVID-19 Cases Over Time",
+       x = 'Date',
+       y = 'Cases') +
+  theme_minimal()
+
+ggplot(totals_summary, aes(x = Date, y = total_deaths)) +
+  geom_line(color = "red", size = 1) +
+  labs(title = "COVID-19 Deaths Over Time",
+       x = 'Date',
+       y = 'Deaths') +
+  theme_minimal()
+```
+
+
+
+In both of these charts, we can see the steady increase of cases and deaths over
+time. This is expected because of the contagious aspect of the virus. Side by
+side the charts can be slightly misleading because of the similar trends between
+the two. However, without closer inspection of the y-axes, it could appear that
+the number of cases and deaths are comparable to one another when in reality,
+the number of cases drastically outweighs the number of deaths.The charts can be
+easily interpreted, showing that there is a positive trend upwards with both
+deaths and cases, graphically indicating a correlation between the cases and
+deaths over time.
+
+
+```{r total cases/deaths per state}
+
+# Create a new data frame with the total cases for each state
+totals_per_state <- us_data %>% 
+  select(Province_State, deaths, cases) %>% 
+  group_by(Province_State) %>% 
+  summarize(total_deaths = max(deaths), total_cases = max(cases))
+
+# Arrange in descending order to see the ones with the greatest total deaths
+totals_per_state %>% 
+  arrange(desc(total_deaths))
+
+```
+
+```{r totals per state charts}
+
+# Make the Province_State column to a factor column
+totals_per_state$Province_State <- factor(totals_per_state$Province_State, levels = totals_per_state$Province_State[order(totals_per_state$total_deaths)])
+
+# Plot the bar chart with the descending order of the number of deaths and cases
+# and filter just to the top 10
+ggplot(head(totals_per_state %>% 
+              arrange(desc(total_deaths)), 10), aes(x = Province_State, y = total_deaths, fill = total_deaths)) +
+  geom_bar(stat = "identity") +
+  scale_fill_gradient(low = "pink", high = "red") + 
+  coord_flip() +
+  labs(title = "Total Deaths per State", x = "State", y = "Number of Deaths") +
+  theme_minimal()
+
+totals_per_state$Province_State <- factor(totals_per_state$Province_State, levels = totals_per_state$Province_State[order(totals_per_state$total_cases)])
+
+# Plot the second bar chart in the same way
+ggplot(head(totals_per_state %>% 
+              arrange(desc(total_cases)), 10), aes(x = Province_State, y = total_cases, fill = total_cases)) +
+  geom_bar(stat = "identity") +
+  scale_fill_gradient(low = "pink", high = "red") +  # You can remove this line
+  coord_flip() +
+  labs(title = "Total Cases per State", x = "State", y = "Number of Cases") +
+  theme_minimal()
+
+
+    
+```
+
+
+
+In these two graphs we can see which of the states were impacted the most in 
+terms of both cases and deaths. California is significantly the most impacted in
+both instances with states like Arizona and Florida and others are very highly
+affected. It is possible that these states have a higher population count
+which would help to understand why there are so many more cases and deaths.
+By understanding which states can be significantly impacted by a rapidly spread
+virus, this can help future public health officials to know which states may be 
+the most at risk in the case of a future outbreak.
+
+
+```{r population per state}
+# Adding in the population element from the us_states_pop data
+totals_per_state_and_pop <- totals_per_state %>% 
+  full_join(us_states_pop) %>% 
+  select('Province_State', 'total_deaths', 'total_cases', 'Population', 'Lat', 'Long_')
+
+# View the data
+head(totals_per_state_and_pop)
+```
+
+
+```{r cases per 100k}
+# Calculate the number of cases for 100,000 people and create a new column
+totals_per_state_and_pop <- totals_per_state_and_pop %>%
+  mutate(cases_per_100k = round((total_cases / Population) * 100000),
+         deaths_per_100k = round((total_deaths / Population) * 100000))
+
+# Arrange in descending order to see the most affected states
+head(totals_per_state_and_pop %>% 
+  arrange(desc(deaths_per_100k
+              )))
+```
+
+
+```{r us map, warning = FALSE}
+
+# Read the GeoJSON file containing US states data into a SpatialPolygonsDataFrame
+states <- geojsonio::geojson_read("https://rstudio.github.io/leaflet/json/us-states.geojson", what = "sp")
+
+# Check the class of the 'states' object and inspect its names
+class(states)
+names(states)
+
+# Create a Leaflet map object centered at latitude 37.8 and longitude -96
+m <- leaflet(states) %>%
+  setView(-96, 37.8, 4) %>%
+  # Add MapBox tiles as the base layer
+  addProviderTiles("MapBox", options = providerTileOptions(
+    id = "mapbox.light",
+    accessToken = Sys.getenv('MAPBOX_ACCESS_TOKEN')))
+
+
+
+# Define the number of bins for the color palette
+num_bins <- 10
+# Generate breaks for the color bins based on 'cases_per_100k' data
+breaks <- seq(min(totals_per_state_and_pop$cases_per_100k, na.rm = TRUE),
+              max(totals_per_state_and_pop$cases_per_100k, na.rm = TRUE),
+              length.out = num_bins + 1)
+
+# Create a color palette with predefined bins
+pal <- colorBin(palette = "YlOrRd", domain = totals_per_state_and_pop$cases_per_100k, bins = breaks)
+
+# Add polygons representing states with color based on 'cases_per_100k'
+m <- m %>%
+  addPolygons(data = states,
+              fillColor = ~pal(totals_per_state_and_pop$cases_per_100k),
+              color = "black",
+              weight = 2,
+              opacity = 1,
+              dashArray = "3",
+              fillOpacity = 0.7,
+              popup = ~paste("State: ", totals_per_state_and_pop$Province_State, "<br>",
+                             "Cases per 100k: ", totals_per_state_and_pop$cases_per_100k, "<br>",
+                             "Population: ", totals_per_state_and_pop$Population),
+              # Options for highlighting a state on mouseover
+              highlightOptions = highlightOptions(
+                weight = 5,
+                color = "#666",
+                dashArray = "",
+                fillOpacity = 0.7,
+                bringToFront = TRUE))
+
+# Render the map
+m
+```
+
+
+
+
+This map demonstrates which states were most impacted with their populations 
+being taken into account. Each color represents the percent of cases per 100k
+people. This allows for us to understand that population does in fact play a 
+large role in determining that the number of cases doesn't necessarily show the
+overall impact on the state as it relates to its population.
+
+
+
+
+```{r wisconsin data table}
+# Filter the lookup_table to get population data for Wisconsin, 
+# excluding rows with missing Admin2 (county) and Population values
+wisconsin_pop_data <- lookup_table %>% 
+  filter(Province_State == 'Wisconsin',
+         !is.na(Admin2) & !is.na(Population))
+
+# Print the filtered population data for Wisconsin
+wisconsin_pop_data
+
+# Calculate totals per county for deaths and cases in Wisconsin
+totals_per_county <- us_data %>% 
+  select(Admin2, Province_State, deaths, cases) %>%
+  filter(Province_State == 'Wisconsin') %>% 
+  group_by(Admin2, Province_State) %>% 
+  summarize(total_deaths = max(deaths), total_cases = max(cases))
+
+head(totals_per_county)
+```
+
+```{r population join, warning = FALSE}
+# Perform a full join between totals_per_county and Wisconsin_pop_data
+totals_per_county_and_pop <- totals_per_county %>% 
+  full_join(wisconsin_pop_data) %>% 
+  select('Admin2','Province_State', 'total_deaths', 'total_cases', 'Population', 'Lat', 'Long_')
+
+# Filter out rows where Population is NA
+totals_per_county_and_pop <- totals_per_county_and_pop[!is.na(totals_per_county_and_pop$Population), ]
+
+head(totals_per_county_and_pop)
+```
+
+```{r totals per city}
+# Add two new columns to totals_per_county_and_pop dataframe:
+# cases_percent: percentage of total cases relative to population
+# deaths_percent: percentage of total deaths relative to population
+totals_per_county_and_pop <- totals_per_county_and_pop %>%
+  mutate(cases_percent = (total_cases / Population) * 100,
+         deaths_percent = (total_deaths / Population) * 100)
+
+
+totals_per_county_and_pop %>%
+  arrange(desc(cases_percent
+              ))
+```
+
+
+
+```{r wisconsin map}
+# Define breakpoints for creating bins based on cases_percent
+breakpoints <- c(0,25,31,34,40,100)
+
+# Create bins based on cases_percent with specified breakpoints
+bins <- cut(totals_per_county_and_pop$cases_percent,
+            breaks = breakpoints,
+            include.lowest = TRUE)
+# Define a color palette using the 'OrRd' Brewer palette
+color_palette <- brewer.pal(length(breakpoints) - 1, "OrRd")
+
+# Assign colors to data points based on their corresponding bins
+colors <- cut(totals_per_county_and_pop$cases_percent,
+              breaks = breakpoints,
+              labels = color_palette)
+
+# Create a Leaflet map object centered at longitude -89.5 and latitude 44.5
+m <- leaflet() %>%
+  setView(lng = -89.5, lat = 44.5, zoom = 7) %>% 
+  addTiles()
+
+
+# Add circle markers to the map representing each county
+m <- m %>% 
+  addCircleMarkers(data = totals_per_county_and_pop,
+                   lng = ~Long_,
+                   lat = ~Lat,
+                   radius = ~sqrt(Population) / 25,  # Adjust radius based on population
+                   color = ~colors,
+                   fillOpacity = 0.5,
+                   popup = ~paste("City: ", Admin2, "<br>", 
+                                  "Percent of Population affected: ", cases_percent))
+
+# Add a legend to the map displaying the color scale and corresponding labels
+m <- m %>%
+  addLegend("bottomright", title = "Cases Percent", colors = color_palette, 
+            labels = c('0-25','26-31','32-34','35-49', '50+'))
+# Display the map
+m
+```
+
+
+This final map shows a spread of cases throughout the state of Wisconsin. This 
+gives us a closer look at the highly concentrated locations. The size of the
+indicates the population size and the color represents the percent of cases
+per 100,000 people. According to the map, the sizes of the circles appear to
+have a correlation with the color of the circle, however this is not exclusively
+the case as there is a significant outlier such as Menominee with a small
+population but was 52% for the population affected. Madison also has one of the
+largest populations but is not the most highly impacted.
+
+
+
+# Results
+
+The findings suggest that the size of the population appears to have an affect
+on the overall number of cases but this doesn't mean that the majority of the
+population was even affected. We can see the steady increase in both cases and 
+deaths, with a clear and somewhat obvious correlation between the number of 
+cases and how that would lead to more deaths by the virus.
+
+Some limitations of this data set and analysis could be that the same individuals
+could have multiple cases of the virus since the data provided is over several
+years. This could change the percent of the population is affected. We also are
+not able to see the spread of the virus as it relates to the age or health
+demographics of the areas to see if that would be a factor in the spread in a 
+city/state. One other limitation of this data set is understanding that it is 
+possible that not everyone who even had COVID, reported it. Access to COVID 
+tests can also impact how many people were able to even report that they had 
+the virus.
+
+
+# Conclusion
+
+In conclusion, our analysis has provided valuable insights into the dynamics of 
+COVID-19 transmission within the United States. We found that the rate of
+infection varies significantly across different states and regions,
+with densely populated areas experiencing higher case counts compared to other
+areas.
+
+Our analysis highlights the need for equitable distribution of resources and
+support to communities disproportionately affected by the pandemic.
+Looking ahead, continued monitoring and analysis of COVID-19 trends are
+necessary to adapt public health policies and interventions effectively.
+By leveraging data-driven insights and collaborative efforts, we can work
+towards controlling the spread of the virus and safeguarding the health
+and well-being of communities nationwide.
+
+
